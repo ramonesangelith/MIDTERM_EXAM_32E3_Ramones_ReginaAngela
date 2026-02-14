@@ -21,14 +21,22 @@ namespace BowlingApp.API.Controllers
         [HttpPost]
         public async Task<ActionResult<Game>> CreateGame([FromBody] List<string> playerNames)
         {
-            // STUDENT TODO:
-            // 1. Create a new Game entity.
-            // 2. Create Player entities for each name provided.
-            // 3. (Optional) Initialize 10 empty Frames for each player to simplify logic?
-            // 4. Save to Database using _context.
-            // 5. Return the created Game object (including Players).
+            var game = new Game { DatePlayed = DateTime.UtcNow, Players = new List<Player>() };
 
-            return StatusCode(501, "Student to implement: CreateGame");
+            foreach (var name in playerNames)
+            {
+                var player = new Player
+                {
+                    Name = name,
+                    Frames = Enumerable.Range(1, 10).Select(i => new Frame { FrameNumber = i }).ToList()
+                };
+                game.Players.Add(player);
+            }
+
+            _context.Games.Add(game);
+            await _context.SaveChangesAsync();
+
+            return CreatedAtAction(nameof(GetGame), new { id = game.Id }, game);
         }
 
         // GET: api/Game/5
@@ -36,12 +44,14 @@ namespace BowlingApp.API.Controllers
         [HttpGet("{id}")]
         public async Task<ActionResult<Game>> GetGame(int id)
         {
-            // STUDENT TODO:
-            // 1. Find the Game by ID.
-            // 2. Include Players and Frames in the query (use .Include()).
-            // 3. Return the Game.
+            var game = await _context.Games
+                .Include(g => g.Players)
+                    .ThenInclude(p => p.Frames)
+                .FirstOrDefaultAsync(g => g.Id == id);
 
-            return StatusCode(501, "Student to implement: GetGame");
+            if (game == null) return NotFound();
+
+            return game;
         }
 
         // POST: api/Game/5/roll
@@ -49,19 +59,90 @@ namespace BowlingApp.API.Controllers
         [HttpPost("{gameId}/roll")]
         public async Task<IActionResult> Roll(int gameId, [FromBody] RollRequest request)
         {
-            // STUDENT TODO:
-            // 1. Find the Player and Game.
-            // 2. Determine the Current Frame for the player (the first incompletion frame).
-            // 3. Update the Frame with the rolled pins (Roll1, Roll2, or Roll3).
-            // 4. BOWLING LOGIC:
-            //    - Check for Strikes (10 on 1st roll) -> Mark frame as Strike.
-            //    - Check for Spares (Total 10 on 2 rolls) -> Mark frame as Spare.
-            // 5. SCORING CALCULATION:
-            //    - Update the score for the current frame.
-            //    - CRITICAL: Check *previous* frames. If they were strikes/spares, they might need this new roll to calculate their final score!
-            // 6. Save changes to Database.
+            // 1. Find the Player and Game (with Frames included)
+            var player = await _context.Players
+                .Include(p => p.Frames)
+                .FirstOrDefaultAsync(p => p.Id == request.PlayerId && p.GameId == gameId);
 
-            return StatusCode(501, "Student to implement: Roll");
+            if (player == null) return NotFound("Player or Game not found.");
+
+            // 2. Determine the Current Frame (the first frame that isn't "complete")
+            // We order by FrameNumber to ensure we are processing in sequence.
+            var currentFrame = player.Frames
+                .OrderBy(f => f.FrameNumber)
+                .FirstOrDefault(f => !IsFrameComplete(f));
+
+            if (currentFrame == null) return BadRequest("Game is already finished for this player.");
+
+            // 3. Update the Frame with the rolled pins
+            if (currentFrame.Roll1 == null)
+            {
+                currentFrame.Roll1 = request.Pins;
+            }
+            else if (currentFrame.Roll2 == null)
+            {
+                currentFrame.Roll2 = request.Pins;
+            }
+            else if (currentFrame.FrameNumber == 10 && currentFrame.Roll3 == null)
+            {
+                // Only the 10th frame can have a 3rd roll
+                currentFrame.Roll3 = request.Pins;
+            }
+
+            // 4. Update Scores (using your existing logic)
+            // Note: We pass the ordered list to ensure the loop works correctly
+            UpdateScores(player.Frames.OrderBy(f => f.FrameNumber).ToList());
+
+            // 5. Save changes
+            await _context.SaveChangesAsync();
+
+            return Ok(player);
+        }
+
+        // Helper method to determine if a frame is finished
+        private bool IsFrameComplete(Frame f)
+        {
+            // 10th Frame Logic
+            if (f.FrameNumber == 10)
+            {
+                if (f.Roll1 + f.Roll2 >= 10) // Strike or Spare in the 10th
+                    return f.Roll3 != null;
+                return f.Roll2 != null;
+            }
+
+            // Standard Frame Logic
+            if (f.Roll1 == 10) return true; // Strike
+            return f.Roll2 != null;         // Two rolls recorded
+        }
+
+        private void UpdateScores(List<Frame> frames)
+        {
+            int runningTotal = 0;
+            for (int i = 0; i < frames.Count; i++)
+            {
+                var f = frames[i];
+                if (f.Roll1 == null) break; // Frame not started
+
+                // Basic score
+                int frameScore = (f.Roll1 ?? 0) + (f.Roll2 ?? 0) + (f.Roll3 ?? 0);
+
+                // Strike Bonus
+                if (f.Roll1 == 10 && i < 9)
+                {
+                    var next = frames[i + 1];
+                    frameScore += (next.Roll1 ?? 0);
+                    if (next.Roll1 == 10 && i < 8) frameScore += (frames[i + 2].Roll1 ?? 0);
+                    else frameScore += (next.Roll2 ?? 0);
+                }
+                // Spare Bonus
+                else if ((f.Roll1 + f.Roll2) == 10 && i < 9)
+                {
+                    frameScore += (frames[i + 1].Roll1 ?? 0);
+                }
+
+                runningTotal += frameScore;
+                f.Score = runningTotal;
+            }
         }
     }
 
